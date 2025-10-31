@@ -239,5 +239,4 @@ threading.Thread(target=run_flask).start()
 # -----------------------------
 if __name__ == "__main__":
     print("✅ Bot is starting...")
-    app.run_polling() الان بات بالا میاد اما به درستی کار نمیکنه گیج میزنه  تو ببین میتونی متوجه بشی من کجای کارم اشتباه بوده و کدم چه ایرادی داره
-
+    app.run_polling()
