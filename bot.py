@@ -39,7 +39,6 @@ try:
 
     # شیت ۱: سوالات طرح‌ها
     df_questions_by_plan = pd.read_excel(foc_file, sheet_name=1)
-    question_column = "سوالات اول"  # می‌توانیم همه ستون‌ها را بعدا ترکیب کنیم
 
 except Exception as e:
     print(f"❌ خطا در بارگذاری فایل‌ها: {e}")
@@ -50,40 +49,29 @@ except Exception as e:
 # -----------------------------
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# لیست سوالات اولیه (ستون سوال اول)
-initial_questions = df_questions_by_plan[question_column].dropna().tolist()
-keyboard_initial_questions = [[KeyboardButton(q)] for q in initial_questions]
-reply_markup_initial_questions = ReplyKeyboardMarkup(keyboard_initial_questions, one_time_keyboard=True)
-
+# -----------------------------
+# دستورات
+# -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # کیبورد طرح‌ها
+    keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
+    reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
     await update.message.reply_text(
-        "👋 سلام! لطفاً یک سوال اولیه انتخاب کنید:",
-        reply_markup=reply_markup_initial_questions
+        "👋 سلام! لطفاً طرح مورد نظر خود را انتخاب کنید:",
+        reply_markup=reply_markup_plans
     )
-    context.user_data["state"] = "choosing_initial_question"
+    context.user_data["state"] = "choosing_plan"
 
 # -----------------------------
-# مدیریت پیام‌ها و تحلیل سوال‌ها
+# مدیریت پیام‌ها
 # -----------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     state = context.user_data.get("state", "")
 
     try:
-        # ------------------- مرحله سوال اولیه -------------------
-        if state == "choosing_initial_question":
-            context.user_data["initial_question"] = text
-            keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
-            reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
-            await update.message.reply_text(
-                "📋 لطفاً طرح مورد نظر خود را انتخاب کنید:",
-                reply_markup=reply_markup_plans
-            )
-            context.user_data["state"] = "choosing_plan"
-            return
-
-        # ------------------- مرحله انتخاب طرح -------------------
-        elif state == "choosing_plan":
+        # ------------------- انتخاب طرح -------------------
+        if state == "choosing_plan":
             selected_number = title_to_number.get(text)
             if not selected_number:
                 await update.message.reply_text("❌ طرح یافت نشد، لطفاً دوباره انتخاب کنید.")
@@ -92,17 +80,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["selected_number"] = selected_number
             context.user_data["selected_table"] = title_to_table[text]
 
-            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number, "سوالات اول"].dropna().tolist()
+            # لیست سوال‌های همان طرح
+            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number].iloc[:, 1:].fillna("").values.flatten()
+            questions = [q for q in questions if q]  # حذف سلول‌های خالی
             keyboard_questions = [[KeyboardButton(q)] for q in questions]
             reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, one_time_keyboard=True)
             await update.message.reply_text(
                 "📋 لطفاً سوال خود را انتخاب کنید:",
-                reply_markup=keyboard_questions
+                reply_markup=reply_markup_questions
             )
             context.user_data["state"] = "choosing_question"
             return
 
-        # ------------------- مرحله پاسخ به سوال -------------------
+        # ------------------- پاسخ به سوال -------------------
         elif state == "choosing_question":
             table_name = context.user_data.get("selected_table")
             selected_number = context.user_data.get("selected_number")
@@ -114,7 +104,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ Table با نام '{table_name}' یافت نشد.")
                 return
 
-            # خواندن Table
             tbl = ws.tables[table_name]
             min_col, min_row, max_col, max_row = range_boundaries(tbl.ref)
             data = [
@@ -125,29 +114,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = data[1:]
             df_table = pd.DataFrame(rows, columns=columns)
 
-            # تشخیص ستون‌ها
-            question_cols = [c for c in df_table.columns if c and ("سؤال" in str(c) or "سوال" in str(c))]
-            question_col = question_cols[0] if question_cols else None
-            answer_cols = [c for c in df_table.columns if c != question_col]
-            answer_col = answer_cols[0] if answer_cols else None
-
-            # ---- تحلیل سوال‌ها ----
+            # تحلیل سوال‌ها
             # رتبه X کیه؟
-            if re.search(r"رتبه (\d+) کیه", text):
-                match = re.search(r"رتبه (\d+) کیه", text)
-                rank_number = int(match.group(1))
-                if "رتبه" not in df_table.columns or "نام" not in df_table.columns or "نام خانوادگی" not in df_table.columns:
-                    await update.message.reply_text("❌ ستون‌های لازم برای رتبه‌ها یافت نشد.")
-                    return
+            match_rank = re.search(r"رتبه (\d+) کیه", text)
+            if match_rank:
+                rank_number = int(match_rank.group(1))
                 row = df_table[df_table["رتبه"] == rank_number]
                 if row.empty:
                     await update.message.reply_text(f"❌ هیچ فردی با رتبه {rank_number} یافت نشد.")
-                    return
-                await update.message.reply_text(f"💡 رتبه {rank_number}: {row['نام'].values[0]} {row['نام خانوادگی'].values[0]}")
+                else:
+                    await update.message.reply_text(f"💡 رتبه {rank_number}: {row['نام'].values[0]} {row['نام خانوادگی'].values[0]}")
                 return
 
-            # رتبه من چندمه؟
-            elif "رتبه من" in text or "رتبه خودش" in text:
+            # رتبه من چندمه یا فاصله من با نفر X
+            elif "رتبه من" in text or "رتبه خودش" in text or "فاصله من با" in text:
                 await update.message.reply_text("لطفاً کد پرسنلی خود را وارد کنید:")
                 context.user_data["state"] = "waiting_for_id"
                 context.user_data["last_question"] = text
@@ -155,35 +135,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # 5 نفر اول چه کسانی هستند؟
             elif "5نفر اول" in text or "5 نفر اول" in text:
-                if "رتبه" not in df_table.columns or "نام" not in df_table.columns or "نام خانوادگی" not in df_table.columns:
-                    await update.message.reply_text("❌ ستون‌های لازم برای رتبه‌ها یافت نشد.")
-                    return
                 top5 = df_table.sort_values("رتبه").head(5)
                 result = "\n".join([f"{r['رتبه']}: {r['نام']} {r['نام خانوادگی']}" for idx, r in top5.iterrows()])
                 await update.message.reply_text(f"💡 5 نفر اول:\n{result}")
                 return
 
-            # فاصله من با نفر اول/پنجم
-            elif "فاصله من با" in text:
-                await update.message.reply_text("لطفاً کد پرسنلی خود را وارد کنید:")
-                context.user_data["state"] = "waiting_for_id"
-                context.user_data["last_question"] = text
+            # سایر سوال‌ها
+            else:
+                await update.message.reply_text("💡 این سوال بر اساس Table تحلیل شد اما جواب مستقیم یافت نشد.")
                 return
 
-            # سایر سوال‌ها: lookup ساده
-            else:
-                if question_col and answer_col:
-                    row = df_table[df_table[question_col] == text]
-                    if row.empty:
-                        await update.message.reply_text("💡 جواب بر اساس Table تحلیل شد اما یافت نشد.")
-                        return
-                    await update.message.reply_text(f"💡 جواب تحلیل شده:\n{row[answer_col].values[0]}")
-                    return
-                else:
-                    await update.message.reply_text("❌ ستون‌های لازم برای پاسخ یافت نشد.")
-                    return
-
-        # ------------------- مرحله دریافت کد پرسنلی -------------------
+        # ------------------- دریافت کد پرسنلی -------------------
         elif state == "waiting_for_id":
             emp_id = text
             table_name = context.user_data.get("selected_table")
@@ -191,9 +153,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             wb = load_workbook(liga_file, data_only=True)
             ws = wb["فروشنده"]
-            if table_name not in ws.tables:
-                await update.message.reply_text(f"❌ Table با نام '{table_name}' یافت نشد.")
-                return
             tbl = ws.tables[table_name]
             min_col, min_row, max_col, max_row = range_boundaries(tbl.ref)
             data = [
@@ -202,55 +161,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             df_table = pd.DataFrame(data[1:], columns=data[0])
 
-            if "کد پرسنلی" not in df_table.columns:
-                await update.message.reply_text("❌ ستون کد پرسنلی یافت نشد.")
-                return
-
             row = df_table[df_table["کد پرسنلی"] == emp_id]
             if row.empty:
                 await update.message.reply_text("❌ کد پرسنلی یافت نشد.")
             else:
-                # رتبه من چندمه؟
-                if "رتبه" in df_table.columns and ("رتبه من" in last_question or "رتبه خودش" in last_question):
+                if "رتبه من" in last_question or "رتبه خودش" in last_question:
                     rank = row["رتبه"].values[0]
                     await update.message.reply_text(f"💡 رتبه شما: {rank}")
-                # فاصله من با نفر اول/پنجم
                 elif "فاصله من با" in last_question:
-                    if "رتبه" in df_table.columns:
-                        target_rank = 1 if "نفر اول" in last_question else 5
-                        target_row = df_table[df_table["رتبه"] == target_rank]
-                        if target_row.empty:
-                            await update.message.reply_text("❌ فرد هدف یافت نشد.")
+                    target_rank = 1 if "نفر اول" in last_question else 5
+                    target_row = df_table[df_table["رتبه"] == target_rank]
+                    if target_row.empty:
+                        await update.message.reply_text("❌ فرد هدف یافت نشد.")
+                    else:
+                        num_cols = [c for c in df_table.columns if c not in ["رتبه","کد پرسنلی","نام","نام خانوادگی"]]
+                        if not num_cols:
+                            await update.message.reply_text("❌ ستونی برای محاسبه فاصله یافت نشد.")
                         else:
-                            num_cols = [c for c in df_table.columns if c not in ["رتبه", "کد پرسنلی", "نام", "نام خانوادگی"]]
-                            if not num_cols:
-                                await update.message.reply_text("❌ ستونی برای محاسبه فاصله یافت نشد.")
-                            else:
-                                col = num_cols[0]
-                                diff = target_row[col].values[0] - row[col].values[0]
-                                await update.message.reply_text(f"💡 فاصله شما با نفر {target_rank}: {diff}")
-                else:
-                    await update.message.reply_text("❌ سوال نامشخص است.")
+                            col = num_cols[0]
+                            diff = target_row[col].values[0] - row[col].values[0]
+                            await update.message.reply_text(f"💡 فاصله شما با نفر {target_rank}: {diff}")
 
-            # بازگرداندن کیبورد سوالات طرح
+            # بازگشت به کیبورد سوال‌ها
             selected_number = context.user_data.get("selected_number")
-            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number, "سوالات اول"].dropna().tolist()
+            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number].iloc[:, 1:].fillna("").values.flatten()
+            questions = [q for q in questions if q]
             keyboard_questions = [[KeyboardButton(q)] for q in questions]
             reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, one_time_keyboard=True)
             await update.message.reply_text(
                 "📋 لطفاً سوال خود را انتخاب کنید:",
-                reply_markup=keyboard_questions
+                reply_markup=reply_markup_questions
             )
             context.user_data["state"] = "choosing_question"
             return
 
         # ------------------- حالت پیش‌فرض -------------------
         else:
-            await update.message.reply_text(
-                "👋 لطفاً یک سوال اولیه انتخاب کنید:",
-                reply_markup=reply_markup_initial_questions
-            )
-            context.user_data["state"] = "choosing_initial_question"
+            await start(update, context)
 
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در پردازش پیام: {e}")
