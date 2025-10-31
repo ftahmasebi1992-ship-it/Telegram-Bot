@@ -20,13 +20,12 @@ if not BOT_TOKEN:
 # فایل‌ها
 # -----------------------------
 foc_file = "FOC.xlsx"
-liga_file = "Rliga 140408 - TG.xlsx"
 
 # -----------------------------
 # بارگذاری داده‌ها یک بار در حافظه
 # -----------------------------
 try:
-    # شیت اول
+    # شیت اول: اطلاعات طرح‌ها
     df1 = pd.read_excel(foc_file, sheet_name=0)
     required_columns_df1 = ["شماره طرح", "عنوان طرح", "TableName"]
     for col in required_columns_df1:
@@ -36,12 +35,17 @@ try:
     # دیکشنری عنوان → شماره طرح
     title_to_number = dict(zip(df1["عنوان طرح"], df1["شماره طرح"]))
 
-    # شیت دوم
+    # شیت دوم: سؤالات
     df2 = pd.read_excel(foc_file, sheet_name=1)
-    required_columns_df2 = ["شماره طرح", "سؤال"]
-    for col in required_columns_df2:
-        if col not in df2.columns:
-            raise ValueError(f"❌ ستون '{col}' در شیت ۱ فایل موجود نیست.")
+    
+    # پیدا کردن ستون سؤال (انعطاف‌پذیر)
+    question_column = None
+    for col in df2.columns:
+        if "سؤال" in col or "سوال" in col:
+            question_column = col
+            break
+    if not question_column:
+        raise ValueError("❌ ستون مربوط به سوالات در شیت ۱ فایل موجود نیست.")
 
 except Exception as e:
     print(f"❌ خطا در بارگذاری فایل‌ها: {e}")
@@ -83,7 +87,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         table_name = row["TableName"].values[0]
 
         # پیدا کردن سوالات
-        questions = df2.loc[df2["شماره طرح"] == selected_number, "سؤال"].dropna().tolist()
+        questions = df2.loc[df2["شماره طرح"] == selected_number, question_column].dropna().tolist()
         if questions:
             questions_text = "\n".join([f"- {q}" for q in questions])
         else:
