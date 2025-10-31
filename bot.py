@@ -23,50 +23,76 @@ foc_file = "FOC.xlsx"
 liga_file = "Rliga 140408 - TG.xlsx"
 
 # -----------------------------
+# بارگذاری داده‌ها یک بار در حافظه
+# -----------------------------
+try:
+    # شیت اول
+    df1 = pd.read_excel(foc_file, sheet_name=0)
+    required_columns_df1 = ["شماره طرح", "عنوان طرح", "TableName"]
+    for col in required_columns_df1:
+        if col not in df1.columns:
+            raise ValueError(f"❌ ستون '{col}' در شیت ۰ فایل موجود نیست.")
+
+    # دیکشنری عنوان → شماره طرح
+    title_to_number = dict(zip(df1["عنوان طرح"], df1["شماره طرح"]))
+
+    # شیت دوم
+    df2 = pd.read_excel(foc_file, sheet_name=1)
+    required_columns_df2 = ["شماره طرح", "سؤال"]
+    for col in required_columns_df2:
+        if col not in df2.columns:
+            raise ValueError(f"❌ ستون '{col}' در شیت ۱ فایل موجود نیست.")
+
+except Exception as e:
+    print(f"❌ خطا در بارگذاری فایل‌ها: {e}")
+    exit(1)
+
+# -----------------------------
 # ربات تلگرام
 # -----------------------------
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        df = pd.read_excel(foc_file, sheet_name=0)
-        if "شماره طرح" not in df.columns:
-            await update.message.reply_text("❌ ستون 'شماره طرح' در فایل موجود نیست.")
-            return
+# کیبورد با عنوان طرح‌ها
+plans = list(title_to_number.keys())
+keyboard = [[KeyboardButton(p)] for p in plans]
+reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
 
-        plans = df["شماره طرح"].dropna().tolist()
-        keyboard = [[KeyboardButton(p)] for p in plans]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        await update.message.reply_text("👋 سلام! لطفاً طرح مورد نظر خود را انتخاب کنید:", reply_markup=reply_markup)
-    except Exception as e:
-        await update.message.reply_text(f"❌ خطا در خواندن فایل: {e}")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 سلام! لطفاً طرح مورد نظر خود را انتخاب کنید:",
+        reply_markup=reply_markup
+    )
+    # ذخیره دیکشنری در user_data برای استفاده بعدی
+    context.user_data["title_to_number"] = title_to_number
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     try:
-        df1 = pd.read_excel(foc_file, sheet_name=0)
-        df2 = pd.read_excel(foc_file, sheet_name=1)
+        title_to_number_local = context.user_data.get("title_to_number", {})
+        selected_number = title_to_number_local.get(text)
 
-        required_columns_df1 = ["شماره طرح", "TableName"]
-        required_columns_df2 = ["شماره طرح", "سؤال"]
-
-        for col in required_columns_df1:
-            if col not in df1.columns:
-                await update.message.reply_text(f"❌ ستون '{col}' در شیت ۰ فایل موجود نیست.")
-                return
-        for col in required_columns_df2:
-            if col not in df2.columns:
-                await update.message.reply_text(f"❌ ستون '{col}' در شیت ۱ فایل موجود نیست.")
-                return
-
-        if text in df1["شماره طرح"].values:
-            table_name = df1.loc[df1["شماره طرح"] == text, "TableName"].values[0]
-            questions = df2.loc[df2["شماره طرح"] == text, "سؤال"].dropna().tolist()
-            questions_text = "\n".join([f"- {q}" for q in questions])
-            await update.message.reply_text(f"📋 سؤالات مربوط به طرح {text}:\n\n{questions_text}")
-            context.user_data["selected_table"] = table_name
-        else:
+        if not selected_number:
             await update.message.reply_text("❌ طرح یافت نشد. لطفاً از لیست انتخاب کنید.")
+            return
+
+        # پیدا کردن TableName
+        row = df1[df1["شماره طرح"] == selected_number]
+        if row.empty:
+            await update.message.reply_text("❌ اطلاعات مربوط به طرح یافت نشد.")
+            return
+        table_name = row["TableName"].values[0]
+
+        # پیدا کردن سوالات
+        questions = df2.loc[df2["شماره طرح"] == selected_number, "سؤال"].dropna().tolist()
+        if questions:
+            questions_text = "\n".join([f"- {q}" for q in questions])
+        else:
+            questions_text = "❌ سوالی برای این طرح موجود نیست."
+
+        await update.message.reply_text(f"📋 سؤالات مربوط به طرح '{text}':\n\n{questions_text}")
+
+        context.user_data["selected_table"] = table_name
+
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در پردازش پیام: {e}")
 
@@ -86,7 +112,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
 
-# اجرای Flask در یک Thread جداگانه
 threading.Thread(target=run_flask).start()
 
 # -----------------------------
