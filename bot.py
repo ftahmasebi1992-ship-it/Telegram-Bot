@@ -45,17 +45,27 @@ except Exception as e:
     exit(1)
 
 # -----------------------------
+# بارگذاری فایل Excel اصلی
+# -----------------------------
+try:
+    wb_liga = load_workbook(liga_file, data_only=True)
+    ws_liga = wb_liga["فروشنده"]
+except Exception as e:
+    print(f"❌ خطا در بارگذاری فایل Rliga: {e}")
+    exit(1)
+
+# -----------------------------
 # ربات تلگرام
 # -----------------------------
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # -----------------------------
-# دستورات
+# دستور /start
 # -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # کیبورد طرح‌ها
-    keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
-    reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
+    plan_names = [str(p) for p in title_to_number.keys() if str(p).strip() != ""]
+    keyboard_plans = [[KeyboardButton(name)] for name in plan_names]
+    reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(
         "👋 سلام! لطفاً طرح مورد نظر خود را انتخاب کنید:",
         reply_markup=reply_markup_plans
@@ -82,9 +92,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # لیست سوال‌های همان طرح
             questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number].iloc[:, 1:].fillna("").values.flatten()
-            questions = [q for q in questions if q]  # حذف سلول‌های خالی
+            questions = [q for q in questions if q]
             keyboard_questions = [[KeyboardButton(q)] for q in questions]
-            reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, one_time_keyboard=True)
+            reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, resize_keyboard=True, one_time_keyboard=True)
             await update.message.reply_text(
                 "📋 لطفاً سوال خود را انتخاب کنید:",
                 reply_markup=reply_markup_questions
@@ -97,17 +107,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             table_name = context.user_data.get("selected_table")
             selected_number = context.user_data.get("selected_number")
 
-            wb = load_workbook(liga_file, data_only=True)
-            ws = wb["فروشنده"]
-
-            if table_name not in ws.tables:
+            if table_name not in ws_liga.tables:
                 await update.message.reply_text(f"❌ Table با نام '{table_name}' یافت نشد.")
                 return
 
-            tbl = ws.tables[table_name]
+            tbl = ws_liga.tables[table_name]
             min_col, min_row, max_col, max_row = range_boundaries(tbl.ref)
             data = [
-                [ws.cell(row=r, column=c).value for c in range(min_col, max_col+1)]
+                [ws_liga.cell(row=r, column=c).value for c in range(min_col, max_col+1)]
                 for r in range(min_row, max_row+1)
             ]
             columns = data[0]
@@ -115,7 +122,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             df_table = pd.DataFrame(rows, columns=columns)
 
             # تحلیل سوال‌ها
-            # رتبه X کیه؟
             match_rank = re.search(r"رتبه (\d+) کیه", text)
             if match_rank:
                 rank_number = int(match_rank.group(1))
@@ -126,21 +132,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"💡 رتبه {rank_number}: {row['نام'].values[0]} {row['نام خانوادگی'].values[0]}")
                 return
 
-            # رتبه من چندمه یا فاصله من با نفر X
             elif "رتبه من" in text or "رتبه خودش" in text or "فاصله من با" in text:
                 await update.message.reply_text("لطفاً کد پرسنلی خود را وارد کنید:")
                 context.user_data["state"] = "waiting_for_id"
                 context.user_data["last_question"] = text
                 return
 
-            # 5 نفر اول چه کسانی هستند؟
             elif "5نفر اول" in text or "5 نفر اول" in text:
                 top5 = df_table.sort_values("رتبه").head(5)
                 result = "\n".join([f"{r['رتبه']}: {r['نام']} {r['نام خانوادگی']}" for idx, r in top5.iterrows()])
                 await update.message.reply_text(f"💡 5 نفر اول:\n{result}")
                 return
 
-            # سایر سوال‌ها
             else:
                 await update.message.reply_text("💡 این سوال بر اساس Table تحلیل شد اما جواب مستقیم یافت نشد.")
                 return
@@ -151,12 +154,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             table_name = context.user_data.get("selected_table")
             last_question = context.user_data.get("last_question")
 
-            wb = load_workbook(liga_file, data_only=True)
-            ws = wb["فروشنده"]
-            tbl = ws.tables[table_name]
+            tbl = ws_liga.tables[table_name]
             min_col, min_row, max_col, max_row = range_boundaries(tbl.ref)
             data = [
-                [ws.cell(row=r, column=c).value for c in range(min_col, max_col+1)]
+                [ws_liga.cell(row=r, column=c).value for c in range(min_col, max_col+1)]
                 for r in range(min_row, max_row+1)
             ]
             df_table = pd.DataFrame(data[1:], columns=data[0])
@@ -182,12 +183,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             diff = target_row[col].values[0] - row[col].values[0]
                             await update.message.reply_text(f"💡 فاصله شما با نفر {target_rank}: {diff}")
 
-            # بازگشت به کیبورد سوال‌ها
-            selected_number = context.user_data.get("selected_number")
-            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number].iloc[:, 1:].fillna("").values.flatten()
+            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == context.user_data.get("selected_number")].iloc[:, 1:].fillna("").values.flatten()
             questions = [q for q in questions if q]
             keyboard_questions = [[KeyboardButton(q)] for q in questions]
-            reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, one_time_keyboard=True)
+            reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, resize_keyboard=True, one_time_keyboard=True)
             await update.message.reply_text(
                 "📋 لطفاً سوال خود را انتخاب کنید:",
                 reply_markup=reply_markup_questions
@@ -195,7 +194,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["state"] = "choosing_question"
             return
 
-        # ------------------- حالت پیش‌فرض -------------------
         else:
             await start(update, context)
 
