@@ -1,140 +1,230 @@
 import os
+import threading
 import pandas as pd
 from dotenv import load_dotenv
+from flask import Flask
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-from flask import Flask, request
-import asyncio
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# --- بارگذاری توکن از .env ---
+# -----------------------------
+# بارگذاری متغیرهای محیطی
+# -----------------------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    print("❌ BOT_TOKEN not found in environment variables.")
+    print("❌ BOT_TOKEN not found.")
     exit(1)
 
-# --- مسیر فایل‌ها ---
+# -----------------------------
+# فایل‌ها
+# -----------------------------
 foc_file = "FOC.xlsx"
 liga_file = "Rliga 140408 - TG.xlsx"
 
-# --- ایجاد اپ تلگرام ---
-app = Application.builder().token(BOT_TOKEN).build()
+# -----------------------------
+# بارگذاری داده‌ها یک بار
+# -----------------------------
+try:
+    # شیت ۰: طرح‌ها
+    df_plans = pd.read_excel(foc_file, sheet_name=0)
+    required_columns_plans = ["شماره طرح", "عنوان طرح", "TableName"]
+    for col in required_columns_plans:
+        if col not in df_plans.columns:
+            raise ValueError(f"❌ ستون '{col}' در شیت ۰ فایل FOC موجود نیست.")
+    title_to_number = dict(zip(df_plans["عنوان طرح"], df_plans["شماره طرح"]))
+    title_to_table = dict(zip(df_plans["عنوان طرح"], df_plans["TableName"]))
 
-# --- مرحله شروع ---
+    # شیت ۱: سوالات اولیه
+    df_initial_questions = pd.read_excel(foc_file, sheet_name=0)
+    initial_question_column = "عنوان طرح"  # فرض می‌کنیم شیت ۰ شامل سوالات اولیه یا طرح‌هاست
+
+    # شیت ۲: سوالات مرتبط با هر طرح
+    df_questions_by_plan = pd.read_excel(foc_file, sheet_name=1)
+    question_column = None
+    for col in df_questions_by_plan.columns:
+        if "سؤال" in col or "سوال" in col:
+            question_column = col
+            break
+    if not question_column:
+        raise ValueError("❌ ستون سوالات در شیت ۲ فایل FOC موجود نیست.")
+
+except Exception as e:
+    print(f"❌ خطا در بارگذاری فایل‌ها: {e}")
+    exit(1)
+
+# -----------------------------
+# ربات تلگرام
+# -----------------------------
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# کیبورد سوالات اولیه (شیت ۱ FOC)
+initial_questions = df_initial_questions[initial_question_column].dropna().tolist()
+keyboard_initial_questions = [[KeyboardButton(q)] for q in initial_questions]
+reply_markup_initial_questions = ReplyKeyboardMarkup(keyboard_initial_questions, one_time_keyboard=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    df = pd.read_excel(foc_file, sheet_name=0)
-    plans = df[["شماره طرح", "عنوان طرح"]].dropna()
+    await update.message.reply_text(
+        "👋 سلام! لطفاً یک سوال اولیه انتخاب کنید:",
+        reply_markup=reply_markup_initial_questions
+    )
+    context.user_data["state"] = "choosing_initial_question"
 
-    keyboard = [[KeyboardButton(row["عنوان طرح"])] for _, row in plans.iterrows()]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-
-    await update.message.reply_text("👋 سلام! لطفاً طرح مورد نظر خود را انتخاب کنید:", reply_markup=reply_markup)
-    context.user_data["plans"] = plans
-
-# --- هندل پیام ---
+# -----------------------------
+# مدیریت پیام‌ها
+# -----------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    # انتخاب طرح
-    if "selected_plan" not in context.user_data:
-        plans = context.user_data.get("plans", pd.DataFrame())
-        match = plans[plans["عنوان طرح"] == text]
-
-        if match.empty:
-            await update.message.reply_text("❌ لطفاً یکی از طرح‌های موجود را انتخاب کنید.")
-            return
-
-        selected_plan = match.iloc[0]
-        context.user_data["selected_plan"] = selected_plan
-        plan_number = selected_plan["شماره طرح"]
-
-        df_questions = pd.read_excel(foc_file, sheet_name=1)
-        question_col = next((c for c in df_questions.columns if "سؤال" in c or "سوال" in c), None)
-        if not question_col:
-            await update.message.reply_text("❌ ستون سؤال در فایل FOC پیدا نشد.")
-            return
-
-        questions = df_questions[df_questions["شماره طرح"] == plan_number][question_col].dropna().tolist()
-
-        if not questions:
-            await update.message.reply_text("❌ برای این طرح سؤالی ثبت نشده است.")
-            return
-
-        keyboard = [[KeyboardButton(q)] for q in questions]
-        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-        await update.message.reply_text(f"📝 لطفاً یکی از سؤالات طرح '{selected_plan['عنوان طرح']}' را انتخاب کنید:", reply_markup=reply_markup)
-        context.user_data["questions"] = questions
-        return
-
-    # انتخاب سؤال
-    selected_plan = context.user_data["selected_plan"]
-    table_name = selected_plan["TableName"]
+    text = update.message.text
+    state = context.user_data.get("state", "")
 
     try:
-        xl = pd.ExcelFile(liga_file)
-        df_table = None
-        for name, tbl in xl.book.defined_names.items():
-            if name == table_name:
-                ref = tbl.attr_text
-                sheet_name, cell_range = ref.split("!")
-                df_table = xl.parse(sheet_name, header=0)
-                break
+        # -------------------
+        # مرحله سوال اولیه
+        # -------------------
+        if state == "choosing_initial_question":
+            # ذخیره سوال اولیه
+            context.user_data["initial_question"] = text
 
-        if df_table is None:
-            await update.message.reply_text(f"❌ Table با نام '{table_name}' یافت نشد.")
+            # نمایش لیست طرح‌ها
+            keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
+            reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
+            await update.message.reply_text(
+                "📋 لطفاً طرح مورد نظر خود را انتخاب کنید:",
+                reply_markup=reply_markup_plans
+            )
+            context.user_data["state"] = "choosing_plan"
             return
+
+        # -------------------
+        # مرحله انتخاب طرح
+        # -------------------
+        elif state == "choosing_plan":
+            selected_number = title_to_number.get(text)
+            if not selected_number:
+                await update.message.reply_text("❌ طرح یافت نشد، لطفاً دوباره انتخاب کنید.")
+                return
+
+            context.user_data["selected_number"] = selected_number
+            context.user_data["selected_table"] = title_to_table[text]
+
+            # پیدا کردن سوالات مربوط به طرح
+            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number, question_column].dropna().tolist()
+            if not questions:
+                await update.message.reply_text("❌ سوالی برای این طرح موجود نیست.")
+                return
+
+            keyboard_questions = [[KeyboardButton(q)] for q in questions]
+            reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, one_time_keyboard=True)
+            await update.message.reply_text(
+                "📋 لطفاً سوال خود را انتخاب کنید:",
+                reply_markup=reply_markup_questions
+            )
+            context.user_data["state"] = "choosing_question"
+            return
+
+        # -------------------
+        # مرحله انتخاب سوال و پاسخ
+        # -------------------
+        elif state == "choosing_question":
+            table_name = context.user_data.get("selected_table")
+            selected_number = context.user_data.get("selected_number")
+
+            # خواندن جدول مربوطه از liga_file
+            df_table = pd.read_excel(liga_file, sheet_name=table_name)
+
+            # تعیین ستون سوال و جواب
+            question_col = [c for c in df_table.columns if "سؤال" in c or "سوال" in c][0]
+            answer_col = [c for c in df_table.columns if c != question_col][0]
+
+            # اگر سوال "رتبه خودش چندم است" است
+            if "رتبه خودش" in text:
+                await update.message.reply_text("لطفاً کد پرسنلی خود را وارد کنید:")
+                context.user_data["state"] = "waiting_for_id"
+                context.user_data["last_question"] = text
+                return
+
+            # پیدا کردن جواب برای سایر سوالات
+            row = df_table[df_table[question_col] == text]
+            if row.empty:
+                await update.message.reply_text("❌ جواب این سوال یافت نشد.")
+                return
+            answer = row[answer_col].values[0]
+            await update.message.reply_text(f"💡 جواب سوال:\n{answer}")
+
+            # بعد از جواب، دوباره نمایش طرح‌ها
+            keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
+            reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
+            await update.message.reply_text(
+                "📋 لطفاً طرح دیگری انتخاب کنید:",
+                reply_markup=reply_markup_plans
+            )
+            context.user_data["state"] = "choosing_plan"
+            return
+
+        # -------------------
+        # مرحله دریافت کد پرسنلی
+        # -------------------
+        elif state == "waiting_for_id":
+            emp_id = text
+            table_name = context.user_data.get("selected_table")
+            last_question = context.user_data.get("last_question")
+
+            df_table = pd.read_excel(liga_file, sheet_name=table_name)
+            question_col = [c for c in df_table.columns if "سؤال" in c or "سوال" in c][0]
+            answer_col = [c for c in df_table.columns if c != question_col][0]
+
+            row = df_table[df_table["کد پرسنلی"] == emp_id]
+            if row.empty:
+                await update.message.reply_text("❌ کد پرسنلی یافت نشد.")
+            else:
+                rank = row["رتبه"].values[0]
+                await update.message.reply_text(f"💡 رتبه شما: {rank}")
+
+            # بعد از پاسخ، دوباره نمایش سوالات طرح
+            selected_number = context.user_data.get("selected_number")
+            questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number, question_column].dropna().tolist()
+            keyboard_questions = [[KeyboardButton(q)] for q in questions]
+            reply_markup_questions = ReplyKeyboardMarkup(keyboard_questions, one_time_keyboard=True)
+            await update.message.reply_text(
+                "📋 لطفاً سوال خود را انتخاب کنید:",
+                reply_markup=reply_markup_questions
+            )
+            context.user_data["state"] = "choosing_question"
+            return
+
+        else:
+            # اگر وضعیت مشخص نبود، دوباره شروع
+            await update.message.reply_text(
+                "👋 لطفاً یک سوال اولیه انتخاب کنید:",
+                reply_markup=reply_markup_initial_questions
+            )
+            context.user_data["state"] = "choosing_initial_question"
 
     except Exception as e:
-        await update.message.reply_text(f"❌ خطا در خواندن فایل: {e}")
-        return
+        await update.message.reply_text(f"❌ خطا در پردازش پیام: {e}")
 
-    question = text
-
-    if "نفر اول" in question or "رتبه اول" in question:
-        if "رتبه" not in df_table.columns:
-            await update.message.reply_text("❌ ستون رتبه در جدول موجود نیست.")
-            return
-        top_row = df_table.loc[df_table["رتبه"] == 1]
-        if not top_row.empty:
-            name = top_row.iloc[0].get("نام و نام خانوادگی", "ناشناخته")
-            await update.message.reply_text(f"🏆 نفر اول: {name}")
-        else:
-            await update.message.reply_text("❌ نفر اول یافت نشد.")
-    else:
-        await update.message.reply_text("❓ هنوز پاسخ این سؤال در کد تعریف نشده است.")
-
-# --- اضافه کردن هندلرها ---
+# -----------------------------
+# افزودن Handler ها
+# -----------------------------
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# --- Flask برای Webhook ---
-flask_app = Flask(__name__)
+# -----------------------------
+# Flask Healthcheck برای Render
+# -----------------------------
+flask_app = Flask("healthcheck")
+@flask_app.route("/")
+def home():
+    return "Bot is running!"
 
-@flask_app.route("/", methods=["GET"])
-def index():
-    return "Bot is running!", 200
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
 
-@flask_app.route("/", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), app.bot)
-    try:
-        # ✅ ساخت یک event loop جدید برای ترد فعلی
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(app.process_update(update))
-    except Exception as e:
-        print(f"❌ Webhook error: {e}")
-    finally:
-        loop.close()
-    return "ok", 200
+threading.Thread(target=run_flask).start()
 
-async def set_webhook():
-    webhook_url = "https://telegram-bot-1-fp27.onrender.com"
-    await app.bot.delete_webhook()
-    await app.bot.set_webhook(webhook_url)
-    print(f"✅ Webhook set to {webhook_url}")
-
+# -----------------------------
+# اجرای ربات تلگرام
+# -----------------------------
 if __name__ == "__main__":
-    print("🚀 Starting bot with webhook (Render mode)...")
-    asyncio.run(set_webhook())
-    flask_app.run(host="0.0.0.0", port=10000)
+    print("✅ Bot is starting...")
+    app.run_polling()
