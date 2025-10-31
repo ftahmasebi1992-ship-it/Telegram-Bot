@@ -73,7 +73,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         xl = pd.ExcelFile(liga_file)
         df_table = None
-        # پیدا کردن جدول با نام TableName
         for name, tbl in xl.book.defined_names.items():
             if name == table_name:
                 ref = tbl.attr_text
@@ -118,12 +117,20 @@ def index():
 @flask_app.route("/", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), app.bot)
-    asyncio.get_event_loop().create_task(app.process_update(update))
+    try:
+        # ✅ ساخت یک event loop جدید برای ترد فعلی
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(app.process_update(update))
+    except Exception as e:
+        print(f"❌ Webhook error: {e}")
+    finally:
+        loop.close()
     return "ok", 200
 
 async def set_webhook():
     webhook_url = "https://telegram-bot-1-fp27.onrender.com"
-    await app.bot.delete_webhook()  # حذف webhook قبلی اگر وجود دارد
+    await app.bot.delete_webhook()
     await app.bot.set_webhook(webhook_url)
     print(f"✅ Webhook set to {webhook_url}")
 
