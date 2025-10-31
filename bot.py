@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from flask import Flask
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from openpyxl import load_workbook
 
 # -----------------------------
 # بارگذاری متغیرهای محیطی
@@ -34,6 +35,10 @@ try:
     title_to_number = dict(zip(df_plans["عنوان طرح"], df_plans["شماره طرح"]))
     title_to_table = dict(zip(df_plans["عنوان طرح"], df_plans["TableName"]))
 
+    # شیت ۱: سوالات اولیه
+    df_initial_questions = pd.read_excel(foc_file, sheet_name=0)
+    initial_question_column = "عنوان طرح"
+
     # شیت ۲: سوالات مرتبط با هر طرح
     df_questions_by_plan = pd.read_excel(foc_file, sheet_name=1)
     question_column = None
@@ -53,15 +58,17 @@ except Exception as e:
 # -----------------------------
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+# کیبورد سوالات اولیه (شیت ۱ FOC)
+initial_questions = df_initial_questions[initial_question_column].dropna().tolist()
+keyboard_initial_questions = [[KeyboardButton(q)] for q in initial_questions]
+reply_markup_initial_questions = ReplyKeyboardMarkup(keyboard_initial_questions, one_time_keyboard=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # فقط لیست طرح‌ها (بدون سوال اولیه)
-    keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
-    reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
     await update.message.reply_text(
-        "📋 لطفاً طرح مورد نظر خود را انتخاب کنید:",
-        reply_markup=reply_markup_plans
+        "👋 سلام! لطفاً یک سوال اولیه انتخاب کنید:",
+        reply_markup=reply_markup_initial_questions
     )
-    context.user_data["state"] = "choosing_plan"
+    context.user_data["state"] = "choosing_initial_question"
 
 # -----------------------------
 # مدیریت پیام‌ها
@@ -72,9 +79,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # -------------------
+        # مرحله سوال اولیه
+        # -------------------
+        if state == "choosing_initial_question":
+            context.user_data["initial_question"] = text
+            keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
+            reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
+            await update.message.reply_text(
+                "📋 لطفاً طرح مورد نظر خود را انتخاب کنید:",
+                reply_markup=reply_markup_plans
+            )
+            context.user_data["state"] = "choosing_plan"
+            return
+
+        # -------------------
         # مرحله انتخاب طرح
         # -------------------
-        if state == "choosing_plan":
+        elif state == "choosing_plan":
             selected_number = title_to_number.get(text)
             if not selected_number:
                 await update.message.reply_text("❌ طرح یافت نشد، لطفاً دوباره انتخاب کنید.")
@@ -105,31 +126,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             table_name = context.user_data.get("selected_table")
             selected_number = context.user_data.get("selected_number")
 
-            # فقط از شیت فروشنده می‌خوانیم
-            df_seller = pd.read_excel(liga_file, sheet_name="فروشنده")
+            # خواندن Table از شیت "فروشنده"
+            wb = load_workbook(liga_file, data_only=True)
+            ws = wb["فروشنده"]
 
-            # فقط ردیف‌های مربوط به Table انتخاب‌شده
-            df_table = df_seller[df_seller["TableName"] == table_name]
-
-            if df_table.empty:
-                await update.message.reply_text(f"❌ Table '{table_name}' در شیت فروشنده یافت نشد.")
+            if table_name not in ws.tables:
+                await update.message.reply_text(f"❌ Table با نام '{table_name}' یافت نشد.")
                 return
 
-            # اگر سوال "رتبه خودش" باشد
+            tbl = ws.tables[table_name]
+            data = ws[tbl.ref]
+            columns = [cell.value for cell in data[0]]
+            rows = [[cell.value for cell in r] for r in data[1:]]
+            df_table = pd.DataFrame(rows, columns=columns)
+
+            question_col = [c for c in df_table.columns if "سؤال" in c or "سوال" in c][0]
+            answer_col = [c for c in df_table.columns if c != question_col][0]
+
             if "رتبه خودش" in text:
                 await update.message.reply_text("لطفاً کد پرسنلی خود را وارد کنید:")
                 context.user_data["state"] = "waiting_for_id"
                 context.user_data["last_question"] = text
                 return
 
-            # پیدا کردن جواب سوال دیگر
-            if "نفر اول" in text:
-                top_person = df_table.sort_values(by="رتبه").iloc[0]
-                name = top_person["نام"] + " " + top_person["نام خانوادگی"]
-                await update.message.reply_text(f"🏆 {name} رتبه اول است.")
+            row = df_table[df_table[question_col] == text]
+            if row.empty:
+                await update.message.reply_text("❌ جواب این سوال یافت نشد.")
                 return
+            answer = row[answer_col].values[0]
+            await update.message.reply_text(f"💡 جواب سوال:\n{answer}")
 
-            await update.message.reply_text("🤖 سوال شناسایی نشد یا در داده‌ها تعریف نشده است.")
+            keyboard_plans = [[KeyboardButton(p)] for p in title_to_number.keys()]
+            reply_markup_plans = ReplyKeyboardMarkup(keyboard_plans, one_time_keyboard=True)
+            await update.message.reply_text(
+                "📋 لطفاً طرح دیگری انتخاب کنید:",
+                reply_markup=reply_markup_plans
+            )
+            context.user_data["state"] = "choosing_plan"
             return
 
         # -------------------
@@ -138,9 +171,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif state == "waiting_for_id":
             emp_id = text
             table_name = context.user_data.get("selected_table")
+            last_question = context.user_data.get("last_question")
 
-            df_seller = pd.read_excel(liga_file, sheet_name="فروشنده")
-            df_table = df_seller[df_seller["TableName"] == table_name]
+            wb = load_workbook(liga_file, data_only=True)
+            ws = wb["فروشنده"]
+
+            if table_name not in ws.tables:
+                await update.message.reply_text(f"❌ Table با نام '{table_name}' یافت نشد.")
+                return
+
+            tbl = ws.tables[table_name]
+            data = ws[tbl.ref]
+            columns = [cell.value for cell in data[0]]
+            rows = [[cell.value for cell in r] for r in data[1:]]
+            df_table = pd.DataFrame(rows, columns=columns)
 
             row = df_table[df_table["کد پرسنلی"] == emp_id]
             if row.empty:
@@ -149,7 +193,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rank = row["رتبه"].values[0]
                 await update.message.reply_text(f"💡 رتبه شما: {rank}")
 
-            # نمایش مجدد سوالات
             selected_number = context.user_data.get("selected_number")
             questions = df_questions_by_plan.loc[df_questions_by_plan["شماره طرح"] == selected_number, question_column].dropna().tolist()
             keyboard_questions = [[KeyboardButton(q)] for q in questions]
@@ -162,7 +205,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         else:
-            await start(update, context)
+            await update.message.reply_text(
+                "👋 لطفاً یک سوال اولیه انتخاب کنید:",
+                reply_markup=reply_markup_initial_questions
+            )
+            context.user_data["state"] = "choosing_initial_question"
 
     except Exception as e:
         await update.message.reply_text(f"❌ خطا در پردازش پیام: {e}")
