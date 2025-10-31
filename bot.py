@@ -1,13 +1,13 @@
 import os
-import threading
 import pandas as pd
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, request
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 import re
+import asyncio
 
 # -----------------------------
 # بارگذاری متغیرهای محیطی
@@ -207,22 +207,25 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # -----------------------------
-# Flask Healthcheck برای Render
+# Flask Healthcheck + Webhook
 # -----------------------------
 flask_app = Flask("healthcheck")
+
 @flask_app.route("/")
 def home():
     return "Bot is running!"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_flask).start()
+@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, app.bot)
+    asyncio.run(app.update_queue.put(update))
+    return "ok"
 
 # -----------------------------
-# اجرای ربات تلگرام
+# اجرای Flask
 # -----------------------------
 if __name__ == "__main__":
-    print("✅ Bot is starting...")
-    app.run_polling()
+    port = int(os.environ.get("PORT", 10000))
+    print(f"✅ Bot is running on port {port}")
+    flask_app.run(host="0.0.0.0", port=port)
