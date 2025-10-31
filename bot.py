@@ -6,10 +6,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from flask import Flask, request
 import asyncio
 
-# --- بارگذاری توکن از محیط ---
+# --- بارگذاری توکن از .env ---
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 if not BOT_TOKEN:
     print("❌ BOT_TOKEN not found in environment variables.")
     exit(1)
@@ -30,13 +29,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
 
     await update.message.reply_text("👋 سلام! لطفاً طرح مورد نظر خود را انتخاب کنید:", reply_markup=reply_markup)
-    context.user_data["plans"] = plans  # ذخیره لیست طرح‌ها برای مراحل بعدی
+    context.user_data["plans"] = plans
 
-# --- پردازش انتخاب‌ها ---
+# --- هندل پیام ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
-    # مرحله 1: انتخاب طرح
+    # انتخاب طرح
     if "selected_plan" not in context.user_data:
         plans = context.user_data.get("plans", pd.DataFrame())
         match = plans[plans["عنوان طرح"] == text]
@@ -49,11 +48,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["selected_plan"] = selected_plan
         plan_number = selected_plan["شماره طرح"]
 
-        # خواندن سوالات مربوط به طرح
         df_questions = pd.read_excel(foc_file, sheet_name=1)
         question_col = next((c for c in df_questions.columns if "سؤال" in c or "سوال" in c), None)
         if not question_col:
-            await update.message.reply_text("❌ ستون 'سؤال' در فایل FOC یافت نشد.")
+            await update.message.reply_text("❌ ستون سؤال در فایل FOC پیدا نشد.")
             return
 
         questions = df_questions[df_questions["شماره طرح"] == plan_number][question_col].dropna().tolist()
@@ -68,17 +66,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["questions"] = questions
         return
 
-    # مرحله 2: انتخاب سؤال
+    # انتخاب سؤال
     selected_plan = context.user_data["selected_plan"]
     table_name = selected_plan["TableName"]
 
-    # باز کردن Table از فایل liga
     try:
         xl = pd.ExcelFile(liga_file)
-        df_all = xl.parse("فروشنده", header=None)
         df_table = None
-
-        # استخراج جدول از میان Tableها
+        # پیدا کردن جدول با نام TableName
         for name, tbl in xl.book.defined_names.items():
             if name == table_name:
                 ref = tbl.attr_text
@@ -87,7 +82,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
 
         if df_table is None:
-            await update.message.reply_text(f"❌ Table با نام '{table_name}' در فایل یافت نشد.")
+            await update.message.reply_text(f"❌ Table با نام '{table_name}' یافت نشد.")
             return
 
     except Exception as e:
@@ -96,10 +91,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     question = text
 
-    # نمونه تحلیل ساده بر اساس نوع سؤال
     if "نفر اول" in question or "رتبه اول" in question:
         if "رتبه" not in df_table.columns:
-            await update.message.reply_text("❌ ستون 'رتبه' در جدول موجود نیست.")
+            await update.message.reply_text("❌ ستون رتبه در جدول موجود نیست.")
             return
         top_row = df_table.loc[df_table["رتبه"] == 1]
         if not top_row.empty:
@@ -107,26 +101,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🏆 نفر اول: {name}")
         else:
             await update.message.reply_text("❌ نفر اول یافت نشد.")
-
-    elif "رتبه من" in question or "رتبه خودم" in question:
-        await update.message.reply_text("🔢 لطفاً کد پرسنلی خود را وارد کنید:")
-        context.user_data["awaiting_code"] = True
-
-    elif context.user_data.get("awaiting_code"):
-        code = text
-        context.user_data["awaiting_code"] = False
-        if "کد پرسنلی" not in df_table.columns or "رتبه" not in df_table.columns:
-            await update.message.reply_text("❌ ستون‌های لازم در جدول وجود ندارند.")
-            return
-        match = df_table[df_table["کد پرسنلی"].astype(str) == str(code)]
-        if not match.empty:
-            rank = match.iloc[0]["رتبه"]
-            await update.message.reply_text(f"📊 رتبه شما در طرح '{selected_plan['عنوان طرح']}': {rank}")
-        else:
-            await update.message.reply_text("❌ کد پرسنلی شما در جدول یافت نشد.")
-
     else:
-        await update.message.reply_text("❌ متوجه سؤال نشدم. لطفاً یکی از گزینه‌ها را انتخاب کنید.")
+        await update.message.reply_text("❓ هنوز پاسخ این سؤال در کد تعریف نشده است.")
 
 # --- اضافه کردن هندلرها ---
 app.add_handler(CommandHandler("start", start))
@@ -142,15 +118,16 @@ def index():
 @flask_app.route("/", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), app.bot)
-    app.update_queue.put_nowait(update)
+    asyncio.get_event_loop().create_task(app.process_update(update))
     return "ok", 200
 
 async def set_webhook():
-    webhook_url = "https://telegram-bot-1-fp27.onrender.com"  # آدرس سرویس Render شما
+    webhook_url = "https://telegram-bot-1-fp27.onrender.com"
+    await app.bot.delete_webhook()  # حذف webhook قبلی اگر وجود دارد
     await app.bot.set_webhook(webhook_url)
     print(f"✅ Webhook set to {webhook_url}")
 
 if __name__ == "__main__":
-    print("✅ Bot is starting with Webhook...")
+    print("🚀 Starting bot with webhook (Render mode)...")
     asyncio.run(set_webhook())
     flask_app.run(host="0.0.0.0", port=10000)
