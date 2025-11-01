@@ -2,8 +2,12 @@ import os
 import pandas as pd
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes, ConversationHandler
+)
 from dotenv import load_dotenv
+import asyncio
 
 # -------------------------
 load_dotenv()
@@ -22,8 +26,7 @@ telegram_app = ApplicationBuilder().token(TOKEN).build()
 
 # مرحله‌های Conversation
 ASK_PERSONNEL = 1
-
-user_context = {}  # برای ذخیره انتخاب طرح و سوال و کد پرسنلی
+user_context = {}  # ذخیره انتخاب طرح، سوال و کد پرسنلی
 
 # -------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -49,7 +52,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # لیست سوالات مرتبط
         questions = foc_sheet2[foc_sheet2['شماره طرح'] == plan_no]['سوالات اول'].tolist()
-        # تشخیص اینکه سوال نیاز به کد پرسنلی دارد
         question_needs_code = foc_sheet2[foc_sheet2['شماره طرح'] == plan_no]['سوال دوم'].notna().tolist()
 
         keyboard = [
@@ -70,7 +72,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"لطفا کد پرسنلی خود را وارد کنید برای پاسخ به سوال:\n{question_text}")
             return ASK_PERSONNEL
         else:
-            # محاسبه پاسخ بدون کد پرسنلی
             answer = compute_answer(plan_idx, q_idx, None)
             await query.edit_message_text(f"سوال: {question_text}\nپاسخ: {answer}")
             return ConversationHandler.END
@@ -97,14 +98,16 @@ def compute_answer(plan_idx, q_idx, personnel_code):
 
     # انتخاب Table مرتبط
     if table_name in df_plan.columns:
-        df_table = df_plan[[table_name, 'کد پرسنلی']].copy() if 'کد پرسنلی' in df_plan.columns else df_plan[[table_name]]
+        cols = [table_name]
+        if 'کد پرسنلی' in df_plan.columns:
+            cols.append('کد پرسنلی')
+        df_table = df_plan[cols].copy()
     else:
         df_table = df_plan[[c for c in df_plan.columns if table_name in c]]
 
-    # مرتب سازی نزولی
     df_table_sorted = df_table.sort_values(by=table_name, ascending=False)
 
-    # پاسخ‌ها
+    # پاسخ
     if personnel_code:
         if 'کد پرسنلی' in df_table_sorted.columns and personnel_code in df_table_sorted['کد پرسنلی'].astype(str).values:
             row = df_table_sorted[df_table_sorted['کد پرسنلی'].astype(str) == personnel_code].iloc[0]
@@ -134,7 +137,7 @@ telegram_app.add_handler(CallbackQueryHandler(button))
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    telegram_app.update_queue.put(update)
+    asyncio.create_task(telegram_app.update_queue.put(update))
     return "ok"
 
 @app.route("/")
@@ -144,5 +147,4 @@ def index():
 # -------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    telegram_app.start()
     app.run(host="0.0.0.0", port=port)
