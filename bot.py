@@ -1,83 +1,87 @@
 import os
-import asyncio
 import logging
+import asyncio
+from dotenv import load_dotenv
 from flask import Flask, request
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
+    ContextTypes,
 )
 
-# --------------------------------------
-# تنظیمات اولیه و لاگ‌ها
-# --------------------------------------
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-
+# -----------------------------
+# تنظیمات اولیه
+# -----------------------------
+load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-URL = "https://telegram-bot-1-fp27.onrender.com"  # آدرس سرویس در Render
 
-if not TOKEN:
-    raise ValueError("❌ BOT_TOKEN در متغیرهای محیطی تنظیم نشده است!")
+# لاگ‌ها
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-# --------------------------------------
-# تنظیم Flask برای Health Check و Webhook
-# --------------------------------------
-app = Flask(__name__)
-telegram_app = ApplicationBuilder().token(TOKEN).build()
-
-# --------------------------------------
-# هندلرهای بات
-# --------------------------------------
+# -----------------------------
+# تعریف هندلرها
+# -----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[KeyboardButton("سلام 👋")]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(
-        "سلام! من بات تلگرام هستم 🤖\nارسال کن تا پاسخت رو بدم.", reply_markup=reply_markup
-    )
+    await update.message.reply_text("سلام 👋 من بات تلگرام هستم و فعالم!")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if "سلام" in text:
-        await update.message.reply_text("سلام 🌸 حالت چطوره؟")
-    else:
-        await update.message.reply_text(f"گفتی: {text}")
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"گفتی: {update.message.text}")
+
+# -----------------------------
+# ساخت اپ تلگرام
+# -----------------------------
+telegram_app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .build()
+)
 
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# --------------------------------------
-# مسیرها (Routes)
-# --------------------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return "🤖 Bot is running and healthy!"
+# -----------------------------
+# ساخت سرور Flask برای Webhook
+# -----------------------------
+app = Flask(__name__)
 
 @app.route(f"/{TOKEN}", methods=["POST"])
 async def webhook():
-    """دریافت آپدیت‌ها از تلگرام"""
+    """دریافت آپدیت از تلگرام"""
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, telegram_app.bot)
         await telegram_app.process_update(update)
     except Exception as e:
-        logging.error(f"Error in webhook: {e}")
+        logger.error(f"Error in webhook: {e}")
     return "OK"
 
-# --------------------------------------
-# اجرای سرور و تنظیم Webhook
-# --------------------------------------
-if __name__ == "__main__":
-    async def main():
-        webhook_url = f"{URL}/{TOKEN}"
-        await telegram_app.bot.set_webhook(webhook_url)
-        logging.info(f"✅ Webhook set to {webhook_url}")
+@app.route("/", methods=["GET", "HEAD"])
+def index():
+    return "🤖 Bot is live!"
 
+# -----------------------------
+# اجرای نهایی
+# -----------------------------
+async def main():
+    """اجرای بات و Flask"""
+    webhook_url = f"https://telegram-bot-1-fp27.onrender.com/{TOKEN}"
+    logger.info(f"Setting webhook to {webhook_url}")
+
+    # آماده‌سازی و شروع اپلیکیشن
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.bot.set_webhook(webhook_url)
+    logger.info(f"✅ Webhook set to {webhook_url}")
+
+    # اجرای Flask روی Render
+    app.run(host="0.0.0.0", port=10000)
+
+if __name__ == "__main__":
     asyncio.run(main())
-    port = int(os.environ.get("PORT", 10000))
-    logging.info(f"🚀 Starting Flask server on port {port}")
-    app.run(host="0.0.0.0", port=port)
