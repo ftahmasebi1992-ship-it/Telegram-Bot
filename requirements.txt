@@ -1,5 +1,5 @@
 python-telegram-bot==20.3
-pandas
-openpyxl
-python-dotenv
-flask
+pandas==2.3.3
+openpyxl==3.1.5
+python-dotenv==1.2.1
+numpy==2.3.4
